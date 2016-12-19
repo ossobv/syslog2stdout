@@ -164,6 +164,20 @@ const char *from_syslog(
     const char *priority;
     int prioritylen;
 
+    /* https://tools.ietf.org/html/rfc3164#section-4.1.2
+
+    The HEADER contains two fields called the TIMESTAMP and the HOSTNAME.
+    The TIMESTAMP will immediately follow the trailing ">" from the PRI
+    part and single space characters MUST follow each of the TIMESTAMP
+    and HOSTNAME fields.  HOSTNAME will contain the hostname, as it knows
+    itself.
+
+    (Ergo, something like this: HEADER = PRI TIMESTAMP SP HOSTNAME SP MSG)
+    (Timestamp is in "Dec  8 12:34:56" format, and hostname is missing
+    in the wild.)
+
+    */
+
     /* https://tools.ietf.org/html/rfc5424#section-6.1
 
     SYSLOG-MSG      = HEADER SP STRUCTURED-DATA [SP MSG]
@@ -235,6 +249,15 @@ const char *from_syslog(
         return start_buf;
     }
     ++priend; /* after the '>' */
+
+    /* Skip past timestamp if old-style is found. Use the separator
+     * characters as a 99% heuristic. */
+    if (msg_length - (priend - start_msg) >= 16) { /* "Dec  7 12:34:56 " */
+        if (priend[3] == ' ' && priend[6] == ' ' && priend[9] == ':' &&
+                priend[12] == ':' && priend[15] == ' ') {
+            priend += 16; /* skip past TIMESTAMP */
+        }
+    }
 
     /* Prepend named priority */
     newbuf = priend - facilitylen - prioritylen - 3; /* .:SP */

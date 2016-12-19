@@ -26,10 +26,10 @@ A mini-daemon that relays messages written to ``/dev/log`` (or port 514)
 and writes them to stdout.
 
 
-How
----
+How?
+----
 
-Compile.
+Compile:
 
 .. code-block:: console
 
@@ -42,3 +42,23 @@ Replace this in your ``Dockerfile``::
 with this::
 
     CMD /path/to/syslog2stdout & /usr/sbin/cron -f
+
+Your Docker job now looks like this::
+
+    \_ docker-containerd-shim HASH /var/run/docker/libcontainerd/HASH docker-runc
+        \_ /bin/sh -c ./syslog2stdout /dev/log & /usr/sbin/cron -f -L 15
+            \_ ./syslog2stdout /dev/log
+            \_ /usr/sbin/cron -f -L 15
+
+And the logging works as expected:
+
+.. code-block:: console
+
+    $ docker logs -t cron
+    2016-12-19T21:56:32Z cron.info: cron[8]: (CRON) INFO (pidfile fd = 3)
+    2016-12-19T21:56:32Z cron.info: cron[8]: (CRON) INFO (Running @reboot jobs)
+    2016-12-19T21:57:01Z authpriv.info: CRON[9]: pam_unix(cron:session): session opened for user root by (uid=0)
+    2016-12-19T21:57:01Z cron.info: CRON[9]: (root) CMD ([10] frobnicate >/dev/null 2>&1)
+    2016-12-19T21:57:01Z cron.info: CRON[9]: (CRON) error (grandchild #10 failed with exit status 127)
+    2016-12-19T21:57:01Z cron.info: CRON[9]: (root) END ([10] frobnicate >/dev/null 2>&1)
+    2016-12-19T21:57:01Z authpriv.info: CRON[9]: pam_unix(cron:session): session closed for user root

@@ -1,5 +1,5 @@
 .PHONY: clean
-CFLAGS=-O3
+CFLAGS = -Wall -O3
 
 syslog2stdout:
 

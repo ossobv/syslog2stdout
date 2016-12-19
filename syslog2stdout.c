@@ -302,7 +302,6 @@ int main(const int argc, const char *const *argv)
     }
 
     while (1) {
-        char namebuf[256];
         ssize_t size;
         /* All transport receiver implementations SHOULD be able to
          * accept messages of up to and including 2048 octets in
@@ -327,10 +326,13 @@ int main(const int argc, const char *const *argv)
             continue;
         }
 #if 0
-        fprintf(
-            stderr, "got msg with fam %d, addrlen %d, size %zd: %s\n",
-            src_addr.family, addrlen, size,
-            sockaddr_human(&src_addr, namebuf, sizeof(namebuf)));
+        {
+            char namebuf[256];
+            fprintf(
+                stderr, "got msg with fam %d, addrlen %d, size %zd: %s\n",
+                src_addr.family, addrlen, size,
+                sockaddr_human(&src_addr, namebuf, sizeof(namebuf)));
+        }
 #endif
         buf[size] = '\n';
         buf[size + 1] = '\0'; /* just in case */

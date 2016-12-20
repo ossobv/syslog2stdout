@@ -61,7 +61,7 @@ const char *const priorities[8] = {
     "crit",     /*  2  Critical: critical conditions */
     "error",    /*  3  Error: error conditions */
     "warn",     /*  4  Warning: warning conditions */
-    "notice"    /*  5  Notice: normal but significant condition */
+    "notice",   /*  5  Notice: normal but significant condition */
     "info",     /*  6  Informational: informational messages */
     "debug",    /*  7  Debug: debug-level messages */
 };

@@ -9,6 +9,8 @@ configured to log to syslog, this simple daemon comes in handy.
 
 **TL;DR**
 
+Dockerfile::
+
     CMD ./syslog2stdout & /app/that/logs/to/syslog
 
 
@@ -28,49 +30,49 @@ But some applications don't have an option to select logging to stdout.
 The ServerFault thread `make-a-docker-application-write-to-stdout`_
 lists possible tricks to make an application log to stdout anyway.
 
-.. _`http://serverfault.com/questions/599103/make-a-docker-application-write-to-stdout`
+.. _`make-a-docker-application-write-to-stdout`: http://serverfault.com/questions/599103/make-a-docker-application-write-to-stdout
 
 Examples include:
 
-  * Configure the file log as ``/dev/stdout`` directly.
+* Configure the file log as ``/dev/stdout`` directly.
 
-  * Forward request and error logs to docker log collector::
+* Forward request and error logs to docker log collector::
 
-        RUN ln -sf /dev/stdout /var/log/nginx/access.log
-        RUN ln -sf /dev/stderr /var/log/nginx/error.log
+   RUN ln -sf /dev/stdout /var/log/nginx/access.log
+   RUN ln -sf /dev/stderr /var/log/nginx/error.log
 
-  * Tail the application log with a separate backgrounded call to
-    ``tail(1)`` from a ``run.sh`` wrapper script.
+* Tail the application log with a separate backgrounded call to
+  ``tail(1)`` from a ``run.sh`` wrapper script.
 
-However, if the application only logs to syslog, the fix is not that
-easy.
+*However, if the application only logs to syslog, the fix is not that
+simple.*
 
 A couple of possible fixes spring to mind:
 
-  * Install a full fledged syslog server and have it write to stdout.
+* Install a full fledged syslog server and have it write to stdout.
 
-    *That feels like overkill.*
+  *That feels like overkill.*
 
-  * Call the application from a wrapper that rewires the ``syslog(3)``
-    library call to a custom function that replaces it with a call to
-    stdout.
+* Call the application from a wrapper that rewires the ``syslog(3)``
+  library call to a custom function that replaces it with a write to
+  stdout.
 
-    *This could work, but you'd have to do (thread safe) bookkeeping
-    with openlog. But, some applications don't use the libc syslog
-    function and write to /dev/log or port 514 directly, so you wouldn't
-    fix those.*
+  *This could work, but you'd have to do (thread safe) bookkeeping
+  with openlog. But, some applications don't use the libc syslog
+  function and write to /dev/log or port 514 directly, so you wouldn't
+  fix those.*
 
-  * Create a really minimal wrapper daemon that listens on (configurable)
-    ``/dev/log`` or UDP port 514 and relays all messages to stdout.
+* Create a really minimal wrapper daemon that listens on (configurable)
+  ``/dev/log`` or UDP port 514 and relays all messages to stdout.
 
-    **syslog2stdout implements this last option.**
+  **syslog2stdout implements this last option.**
 
 A slight improvement would be if it combined with optional `dumb-init`_
 support so it could spawn both itself and the real application, and it
 could reap parentless children. Let me know if you need that, and I
 will consider adding support for it.
 
-.. _`https://github.com/Yelp/dumb-init`
+.. _`dumb-init`: https://github.com/Yelp/dumb-init
 
 
 Usage
@@ -128,4 +130,6 @@ VoIP phones are doing::
     2016-12-20 10:41:36+0100: local0.info: [2]SIP:RegFailed;Retry in 30s
     2016-12-20 10:41:39+0100: local0.info: ++++ retry query scaps
 
-Enjoy.
+Enjoy!
+
+Walter Doekes, OSSO B.V., 2016.

@@ -140,8 +140,13 @@ const char *sockaddr_human(
         char inet6[INET6_ADDRSTRLEN + 1];
         inet6[INET6_ADDRSTRLEN] = '\0';
         inet_ntop(AF_INET6, &sa->in6.sin6_addr, inet6, INET6_ADDRSTRLEN);
-        written = snprintf(
-            buf, buflen, "[%s]:%hu", inet6, ntohs(sa->in6.sin6_port));
+        if (strncmp(inet6, "::ffff:", 7) != 0) {
+            written = snprintf(
+                buf, buflen, "[%s]:%hu", inet6, ntohs(sa->in6.sin6_port));
+        } else {
+            written = snprintf(
+                buf, buflen, "%s:%hu", inet6 + 7, ntohs(sa->in6.sin6_port));
+        }
     } else if (sa->family == AF_UNIX) {
         written = snprintf(buf, buflen, "\"%s\"", sa->un.sun_path);
     } else {
@@ -154,17 +159,24 @@ const char *sockaddr_human(
 }
 
 const char *from_syslog(
-        char *start_buf, char *start_msg, int msg_length, int *out_length)
+        char *start_buf, char *start_msg, int msg_length,
+        const char *origin, int *out_length)
 {
     int prival;
     char *priend;
     char *newbuf;
+    char *newbufp;
+    int originlen = strlen(origin);
     const char *facility;
     int facilitylen;
     const char *priority;
     int prioritylen;
 
     /* https://tools.ietf.org/html/rfc3164#section-4.1.2
+
+    EXAMPLE FROM logger(1) OVER UNIX:
+
+        "<191>Dec 20 13:28:57 walter: test"
 
     The HEADER contains two fields called the TIMESTAMP and the HOSTNAME.
     The TIMESTAMP will immediately follow the trailing ">" from the PRI
@@ -179,6 +191,12 @@ const char *from_syslog(
     */
 
     /* https://tools.ietf.org/html/rfc5424#section-6.1
+
+    EXAMPLE FROM logger(1) OVER UDP:
+
+        "<191>1 2016-12-20T13:29:49.464902+01:00 walter-desktop walter - - "
+        "[timeQuality tzKnown=\"1\" isSynced=\"1\" syncAccuracy=\"325323\"] "
+        "test"
 
     SYSLOG-MSG      = HEADER SP STRUCTURED-DATA [SP MSG]
 
@@ -229,8 +247,9 @@ const char *from_syslog(
     start_buf[0] = 'E';
     start_buf[1] = 'R';
     start_buf[2] = 'R';
+    start_buf[3] = '\n';
     *out_length = 4;
-    
+
     if (start_msg[0] != '<') {
         return start_buf;
     }
@@ -259,13 +278,31 @@ const char *from_syslog(
         }
     }
 
-    /* Prepend named priority */
+    /* Prepend origin and named priority */
     newbuf = priend - facilitylen - prioritylen - 3; /* .:SP */
-    memcpy(newbuf, facility, facilitylen);
-    newbuf[facilitylen] = '.';
-    memcpy(newbuf + facilitylen + 1, priority, prioritylen);
-    newbuf[facilitylen + prioritylen + 1] = ':';
-    newbuf[facilitylen + prioritylen + 2] = ' ';
+
+    /* If this is sent over UDP, we'll want to know from where. If it's
+     * sent over an UNIX socket, there usually is no source, so this
+     * will be empty. */
+    if (originlen) {
+        int originmax = originlen > 32 ? 32 : originlen;
+        newbuf -= (originlen + 2); /* :SP */
+        /* assert(newbuf>=start_buf) */
+        memcpy(newbuf, origin, originmax);
+        newbufp = newbuf + originmax;
+        *newbufp++ = ':';
+        *newbufp++ = ' ';
+    } else {
+        newbufp = newbuf;
+    }
+
+    memcpy(newbufp, facility, facilitylen);
+    newbufp += facilitylen;
+    *newbufp++ = '.';
+    memcpy(newbufp, priority, prioritylen);
+    newbufp += prioritylen;
+    *newbufp++ = ':';
+    *newbufp++ = ' ';
 
     /* Recalculate length */
     *out_length = msg_length + (start_msg - newbuf);
@@ -288,7 +325,7 @@ int main(const int argc, const char *const *argv)
     if (strlen(argv[1]) && all(*i >= '0' && *i <= '9', argv[1])) {
         const int portno = atoi(argv[1]);
         listentype = "udp";
-        listenfd = listen_on_udp_port(portno); 
+        listenfd = listen_on_udp_port(portno);
     } else {
         const char *listenaddr = argv[1];
         listentype = "unix";
@@ -315,6 +352,7 @@ int main(const int argc, const char *const *argv)
         union sockaddr_any src_addr = {0};
         socklen_t addrlen = sizeof(src_addr);
 
+        char originbuf[256];
         const char *outbuf;
         int outlen;
 
@@ -325,14 +363,12 @@ int main(const int argc, const char *const *argv)
             perror("recvfrom");
             continue;
         }
+
+        sockaddr_human(&src_addr, originbuf, sizeof(originbuf));
 #if 0
-        {
-            char namebuf[256];
-            fprintf(
-                stderr, "got msg with fam %d, addrlen %d, size %zd: %s\n",
-                src_addr.family, addrlen, size,
-                sockaddr_human(&src_addr, namebuf, sizeof(namebuf)));
-        }
+        fprintf(
+            stderr, "got msg with fam %d, addrlen %d, size %zd: %s\n",
+            src_addr.family, addrlen, size, originbuf);
 #endif
         if (size == 0) {
             continue;
@@ -343,7 +379,7 @@ int main(const int argc, const char *const *argv)
         }
         buf[size] = '\0'; /* just in case */
 
-        outbuf = from_syslog(fullbuf, buf, size, &outlen);
+        outbuf = from_syslog(fullbuf, buf, size, originbuf, &outlen);
         if (write(STDOUT_FILENO, outbuf, outlen) < 0) {
             perror("write");
             break; /* this is bad */

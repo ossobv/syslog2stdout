@@ -280,7 +280,7 @@ int main(const int argc, const char *const *argv)
     if (argc != 2) {
         fprintf(
             stderr,
-            "Usage: syslog2stdoutd LISTENADDR\n"
+            "Usage: syslog2stdout LISTENADDR\n"
             "Where LISTENADDR is one of '/dev/log' or '514'\n");
         exit(1);
     }

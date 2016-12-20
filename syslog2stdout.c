@@ -334,10 +334,16 @@ int main(const int argc, const char *const *argv)
                 sockaddr_human(&src_addr, namebuf, sizeof(namebuf)));
         }
 #endif
-        buf[size] = '\n';
-        buf[size + 1] = '\0'; /* just in case */
+        if (size == 0) {
+            continue;
+        }
 
-        outbuf = from_syslog(fullbuf, buf, size + 1 /*LF*/, &outlen);
+        if (buf[size - 1] != '\n') {
+            buf[size++] = '\n';
+        }
+        buf[size] = '\0'; /* just in case */
+
+        outbuf = from_syslog(fullbuf, buf, size, &outlen);
         if (write(STDOUT_FILENO, outbuf, outlen) < 0) {
             perror("write");
             break; /* this is bad */

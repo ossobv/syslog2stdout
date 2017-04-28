@@ -11,7 +11,7 @@ configured to log to syslog, this simple daemon comes in handy.
 
 Dockerfile::
 
-    CMD ./syslog2stdout & /app/that/logs/to/syslog
+    CMD ./syslog2stdout /dev/log & /app/that/logs/to/syslog
 
 
 Problem description
@@ -93,7 +93,7 @@ Replace this in your ``Dockerfile``::
 
 with this::
 
-    CMD /path/to/syslog2stdout & /usr/sbin/cron -f -L 15
+    CMD /path/to/syslog2stdout /dev/log & /usr/sbin/cron -f -L 15
 
 Your Docker job now looks like this::
 
@@ -124,11 +124,11 @@ really minimal temporary syslog daemon. Maybe you want to know what your
 VoIP phones are doing::
 
     $ sudo ./syslog2stdout 514 | wtimestamp
-    2016-12-20 10:41:36+0100: local2.debug: [2]SIP:ICMP Error -1 (c358a084:5060, 7)
-    2016-12-20 10:41:36+0100: local3.debug: RSE_DEBUG: getting alternate from domain:pbx2.example.com
-    2016-12-20 10:41:36+0100: local0.info: [2]SIP:RegFailed;Retry in 30s
-    2016-12-20 10:41:36+0100: local0.info: [2]SIP:RegFailed;Retry in 30s
-    2016-12-20 10:41:39+0100: local0.info: ++++ retry query scaps
+    2016-12-20 10:41:36+0100: 10.123.10.132:47427: local2.debug: [2]SIP:ICMP Error -1 (0a7b0a0b:5060, 7)
+    2016-12-20 10:41:36+0100: 10.123.10.132:47427: local3.debug: RSE_DEBUG: getting alternate from domain:pbx2.example.com
+    2016-12-20 10:41:36+0100: 10.123.10.132:47427: local0.info: [2]SIP:RegFailed;Retry in 30s
+    2016-12-20 10:41:36+0100: 10.123.10.132:47427: local0.info: [2]SIP:RegFailed;Retry in 30s
+    2016-12-20 10:41:39+0100: 10.123.10.132:47427: local0.info: ++++ retry query scaps
 
 Enjoy!
 

@@ -1,4 +1,35 @@
-/* syslog2stdout, Walter Doekes, OSSO B.V., 2016 */
+/* syslog2stdout -- capture syslog and send to stdout, useful for docker
+Copyright (C) 2016-2017  Walter Doekes, OSSO B.V.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+What:
+  A really bare bones syslog daemon that captures syslog events and
+  sends them to stdout. Useful for Dockerized apps that do not provide
+  an option to log to stdout. Also useful to spawn a quick syslog daemon
+  somewhere.
+Example docker usage:
+  CMD ./syslog2stdout /dev/log & /app/that/logs/to/syslog
+Example standalone usage:
+  ./syslog2stdout 514 | while read -r L; do echo "$(date): $L"; done
+Source:
+  https://github.com/ossobv/syslog2stdout
+License:
+  GPL-3.0+
+
+*/
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>

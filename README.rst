@@ -132,4 +132,4 @@ VoIP phones are doing::
 
 Enjoy!
 
-Walter Doekes, OSSO B.V., 2016.
+Walter Doekes, OSSO B.V., 2016-2017.

@@ -13,6 +13,13 @@ Dockerfile::
 
     CMD ./syslog2stdout /dev/log & /app/that/logs/to/syslog
 
+See also GoSpawn_ which also takes care of spawning the subprocess(es)
+and zombie reaping::
+
+    CMD ["/gospawn", "/dev/log", "--", "/app/that/logs/to/syslog"]
+
+.. _GoSpawn: https://github.com/ossobv/gospawn
+
 
 Problem description
 -------------------

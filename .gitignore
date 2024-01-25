@@ -1,3 +1,4 @@
 *.swp
 
 /syslog2stdout
+/syslog2stdout-static

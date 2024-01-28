@@ -1,5 +1,5 @@
 /* syslog2stdout -- capture syslog and send to stdout, useful for docker
-Copyright (C) 2016-2017  Walter Doekes, OSSO B.V.
+Copyright (C) 2016-2017,2024  Walter Doekes, OSSO B.V.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -30,12 +30,14 @@ License:
   GPL-3.0+
 
 */
+#include <assert.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -44,11 +46,11 @@ License:
 
 
 #define all(expr, c_str) ({ \
-        char const *i = (c_str); \
-        while (*i != '\0' && (expr)) { \
-            ++i; \
+        char const *ch = (c_str); \
+        while (*ch != '\0' && (expr)) { \
+            ++ch; \
         } \
-        (*i == '\0'); /* all chars matched expr */ \
+        (*ch == '\0'); /* all chars matched expr */ \
     })
 
 union sockaddr_any {
@@ -96,6 +98,39 @@ const char *const priorities[8] = {
     "info",     /*  6  Informational: informational messages */
     "debug",    /*  7  Debug: debug-level messages */
 };
+
+void process_messages(
+        int* acceptfds, int acceptfds_len, int* listenfds, int listenfds_len);
+
+int listen_on_tcp_port(const int port)
+{
+    int sockfd;
+    struct sockaddr_in6 in6 = {0};
+    int reuse = 1;
+
+    sockfd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    if (sockfd < 0) {
+        return -1;
+    }
+    in6.sin6_family = AF_INET6;
+    in6.sin6_port = htons(port);
+
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int)) < 0) {
+        int temp_errno = errno;
+        perror("setsockopt(SO_REUSEADDR)");
+        close(sockfd);
+        errno = temp_errno;
+        return -1;
+    }
+    if (bind(sockfd, (const struct sockaddr*)&in6, sizeof(in6)) < 0) {
+        int temp_errno = errno;
+        close(sockfd);
+        errno = temp_errno;
+        return -1;
+    }
+
+    return sockfd;
+}
 
 int listen_on_udp_port(const int port)
 {
@@ -342,31 +377,97 @@ const char *from_syslog(
 
 int main(const int argc, const char *const *argv)
 {
-    const char *listentype;
-    int listenfd;
+    int listenfds[1024] = {0};
+    int acceptfds[1] = {0};
+    int argi;
 
-    if (argc != 2) {
+    if (argc < 2 || argc > 4) {
         fprintf(
             stderr,
-            "Usage: syslog2stdout LISTENADDR\n"
-            "Where LISTENADDR is one of '/dev/log' or '514'\n");
+            "Usage: syslog2stdout LISTENADDR...\n"
+            "Where LISTENADDR is one of '/dev/log' or '514' or 'tcp/514'\n");
         exit(1);
     }
 
-    if (strlen(argv[1]) && all(*i >= '0' && *i <= '9', argv[1])) {
-        const int portno = atoi(argv[1]);
-        listentype = "udp";
-        listenfd = listen_on_udp_port(portno);
-    } else {
-        const char *listenaddr = argv[1];
-        listentype = "unix";
-        listenfd = listen_on_unixdgram(listenaddr);
+    for (argi = 1; argi < argc; ++argi) {
+        int listenfd;
+        int needs_accept = 0;
+
+        if (argi == 4) {
+            fprintf(stderr, "max 3 arguments\n");
+            exit(1);
+        }
+
+        if (strncmp(argv[argi], "tcp/", 4) == 0 &&
+                strlen(argv[argi] + 4) &&
+                all(*ch >= '0' && *ch <= '9', argv[argi] + 4)) {
+            const int portno = atoi(argv[argi] + 4);
+            if (acceptfds[0] != 0) {
+                fprintf(stderr, "already listening on TCP port\n");
+                exit(1);
+            }
+            listenfd = listen_on_tcp_port(portno);
+            if (listenfd < 0) {
+                fprintf(
+                    stderr, "listening on TCP port %s failed: %s\n",
+                    argv[argi] + 1, strerror(errno));
+                exit(1);
+            }
+            needs_accept = 1;
+        } else if (strlen(argv[argi]) &&
+                all(*ch >= '0' && *ch <= '9', argv[argi])) {
+            const int portno = atoi(argv[argi]);
+            listenfd = listen_on_udp_port(portno);
+            if (listenfd < 0) {
+                fprintf(
+                    stderr, "listening on UDP port %s failed: %s\n",
+                    argv[argi], strerror(errno));
+                exit(1);
+            }
+        } else {
+            const char *listenaddr = argv[argi];
+            listenfd = listen_on_unixdgram(listenaddr);
+            if (listenfd < 0) {
+                fprintf(
+                    stderr, "listening on UNIX DGRAM path %s failed: %s\n",
+                    argv[argi], strerror(errno));
+                exit(1);
+            }
+        }
+
+        /* Add to listenfds/acceptfds */
+        {
+            int i = 0;
+            assert(listenfd != 0);
+            if (needs_accept) {
+                while (acceptfds[i] != 0 && i < sizeof(acceptfds)) {
+                    ++i;
+                }
+                assert(i < sizeof(acceptfds));
+                acceptfds[i] = listenfd;
+            } else {
+                while (listenfds[i] != 0 && i < sizeof(listenfds)) {
+                    ++i;
+                }
+                assert(i < sizeof(listenfds));
+                listenfds[i] = listenfd;
+            }
+        }
     }
-    if (listenfd < 0) {
-        fprintf(
-            stderr, "listening on %s addr %s failed: %s\n",
-            listentype, argv[1], strerror(errno));
-        exit(1);
+
+    /* Run and listen */
+    process_messages(
+        acceptfds, sizeof(acceptfds), listenfds, sizeof(listenfds));
+    return 0;
+}
+
+void process_messages(
+        int* acceptfds, int acceptfds_len, int* listenfds, int listenfds_len) {
+    if (acceptfds[0] != 0) {
+        assert(!"TCP is not implemented yet");
+    }
+    if (listenfds[1] != 0) {
+        assert(!"multiple listen addresses not implemented yet");
     }
 
     while (1) {
@@ -388,7 +489,7 @@ int main(const int argc, const char *const *argv)
         int outlen;
 
         size = recvfrom(
-            listenfd, buf, buflen, flags,
+            listenfds[0], buf, buflen, flags,
             (struct sockaddr*)&src_addr, &addrlen);
         if (size < 0) {
             perror("recvfrom");
@@ -418,7 +519,7 @@ int main(const int argc, const char *const *argv)
     }
 
     /* We never get here, unless write failed. */
-    close(listenfd);
+    close(listenfds[0]);
     exit(1);
 }
 

@@ -53,6 +53,13 @@ License:
         (*ch == '\0'); /* all chars matched expr */ \
     })
 
+#define array_size(expr) (sizeof(expr) / sizeof((expr)[0]))
+
+/* epoll FD flags */
+const int EFF_MIN = 0x10000;                /* fd must be < EFF_MIN */
+const int EFF_NOCLOSE = EFF_MIN;            /* server socket */
+const int EFF_ACCEPT = EFF_NOCLOSE << 1;    /* needs accept() */
+
 union sockaddr_any {
     sa_family_t family;
     struct sockaddr_in in;
@@ -99,8 +106,10 @@ const char *const priorities[8] = {
     "debug",    /*  7  Debug: debug-level messages */
 };
 
-void process_messages(
-        int* acceptfds, int acceptfds_len, int* listenfds, int listenfds_len);
+int process_epoll_events(int epollfd, int* maxfdp);
+void process_fd_input(int epollfd, int* maxfdp, int fd, int noclose);
+void process_fd_accept(int epollfd, int *maxfdp, int fd);
+void process_fd_close(int epollfd, int *maxfdp, int fd);
 
 int listen_on_tcp_port(const int port)
 {
@@ -123,6 +132,12 @@ int listen_on_tcp_port(const int port)
         return -1;
     }
     if (bind(sockfd, (const struct sockaddr*)&in6, sizeof(in6)) < 0) {
+        int temp_errno = errno;
+        close(sockfd);
+        errno = temp_errno;
+        return -1;
+    }
+    if (listen(sockfd, 100) < 0) {
         int temp_errno = errno;
         close(sockfd);
         errno = temp_errno;
@@ -314,6 +329,7 @@ const char *from_syslog(
     start_buf[1] = 'R';
     start_buf[2] = 'R';
     start_buf[3] = '\n';
+    start_buf[4] = '\0';
     *out_length = 4;
 
     if (start_msg[0] != '<') {
@@ -377,11 +393,12 @@ const char *from_syslog(
 
 int main(const int argc, const char *const *argv)
 {
-    int listenfds[1024] = {0};
-    int acceptfds[1] = {0};
     int argi;
+    int ret;
+    int epollfd;
+    int maxfd;
 
-    if (argc < 2 || argc > 4) {
+    if (argc < 2 || argc > 10) {
         fprintf(
             stderr,
             "Usage: syslog2stdout LISTENADDR...\n"
@@ -389,138 +406,248 @@ int main(const int argc, const char *const *argv)
         exit(1);
     }
 
+    /* Create epoll fd */
+    epollfd = epoll_create1(EPOLL_CLOEXEC);
+    if (epollfd == -1) {
+        perror("epoll_create1");
+        exit(1);
+    }
+
     for (argi = 1; argi < argc; ++argi) {
-        int listenfd;
-        int needs_accept = 0;
+        struct epoll_event ev = {0};
+        int fd;
+        int flags;
 
-        if (argi == 4) {
-            fprintf(stderr, "max 3 arguments\n");
-            exit(1);
-        }
-
+        /* Try opening a listening socket */
         if (strncmp(argv[argi], "tcp/", 4) == 0 &&
                 strlen(argv[argi] + 4) &&
                 all(*ch >= '0' && *ch <= '9', argv[argi] + 4)) {
             const int portno = atoi(argv[argi] + 4);
-            if (acceptfds[0] != 0) {
-                fprintf(stderr, "already listening on TCP port\n");
-                exit(1);
-            }
-            listenfd = listen_on_tcp_port(portno);
-            if (listenfd < 0) {
+            fd = listen_on_tcp_port(portno);
+            if (fd < 0) {
                 fprintf(
-                    stderr, "listening on TCP port %s failed: %s\n",
-                    argv[argi] + 1, strerror(errno));
+                    stderr, "listening on TCP port %d failed: %s\n",
+                    portno, strerror(errno));
                 exit(1);
             }
-            needs_accept = 1;
+            flags = EFF_NOCLOSE | EFF_ACCEPT;
         } else if (strlen(argv[argi]) &&
                 all(*ch >= '0' && *ch <= '9', argv[argi])) {
             const int portno = atoi(argv[argi]);
-            listenfd = listen_on_udp_port(portno);
-            if (listenfd < 0) {
+            fd = listen_on_udp_port(portno);
+            if (fd < 0) {
                 fprintf(
-                    stderr, "listening on UDP port %s failed: %s\n",
-                    argv[argi], strerror(errno));
+                    stderr, "listening on UDP port %d failed: %s\n",
+                    portno, strerror(errno));
                 exit(1);
             }
+            flags = EFF_NOCLOSE;
         } else {
             const char *listenaddr = argv[argi];
-            listenfd = listen_on_unixdgram(listenaddr);
-            if (listenfd < 0) {
+            fd = listen_on_unixdgram(listenaddr);
+            if (fd < 0) {
                 fprintf(
                     stderr, "listening on UNIX DGRAM path %s failed: %s\n",
-                    argv[argi], strerror(errno));
+                    listenaddr, strerror(errno));
                 exit(1);
             }
+            flags = EFF_NOCLOSE;
         }
 
-        /* Add to listenfds/acceptfds */
-        {
-            int i = 0;
-            assert(listenfd != 0);
-            if (needs_accept) {
-                while (acceptfds[i] != 0 && i < sizeof(acceptfds)) {
-                    ++i;
-                }
-                assert(i < sizeof(acceptfds));
-                acceptfds[i] = listenfd;
-            } else {
-                while (listenfds[i] != 0 && i < sizeof(listenfds)) {
-                    ++i;
-                }
-                assert(i < sizeof(listenfds));
-                listenfds[i] = listenfd;
-            }
+        /* Add to poll events */
+        assert(fd < EFF_MIN);
+        ev.data.fd = fd | flags;
+        ev.events = EPOLLIN;
+        if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev) == -1) {
+            perror("epoll_ctl");
+            exit(1);
         }
+
+        maxfd = fd;
     }
 
     /* Run and listen */
-    process_messages(
-        acceptfds, sizeof(acceptfds), listenfds, sizeof(listenfds));
-    return 0;
+    ret = process_epoll_events(epollfd, &maxfd);
+
+    /* Cleanup */
+    close(epollfd);
+    while (maxfd >= 0) {
+        close(maxfd);
+        --maxfd;
+    }
+
+    return ret;
 }
 
-void process_messages(
-        int* acceptfds, int acceptfds_len, int* listenfds, int listenfds_len) {
-    if (acceptfds[0] != 0) {
-        assert(!"TCP is not implemented yet");
-    }
-    if (listenfds[1] != 0) {
-        assert(!"multiple listen addresses not implemented yet");
-    }
+int process_epoll_events(int epollfd, int* maxfdp)
+{
+    /* NOTE: Max events being too low could cause us to never process
+     * events on higher FDs if we keep getting traffic on the low ones.
+     * Not a concern now. */
+#define MAX_EVENTS 100
+    struct epoll_event events[MAX_EVENTS];
+    int nfds;
 
+    /* Go into infinite loop */
     while (1) {
-        ssize_t size;
-        /* All transport receiver implementations SHOULD be able to
-         * accept messages of up to and including 2048 octets in
-         * length.  Transport receivers MAY receive messages larger
-         * than 2048 octets in length. */
-        const size_t buflen = 8192;
-        const size_t bufprefix = 64; /* MUST be enough for "fac.prio: " */
-        char fullbuf[bufprefix + buflen + 2];
-        char *buf = fullbuf + bufprefix;
-        int flags = 0;
-        union sockaddr_any src_addr = {0};
-        socklen_t addrlen = sizeof(src_addr);
+        int i;
 
-        char originbuf[256];
-        const char *outbuf;
-        int outlen;
-
-        size = recvfrom(
-            listenfds[0], buf, buflen, flags,
-            (struct sockaddr*)&src_addr, &addrlen);
-        if (size < 0) {
-            perror("recvfrom");
-            continue;
+        nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
+        if (nfds < 0) {
+            perror("epoll_wait");
+            close(epollfd);
+            return -1;
         }
 
-        sockaddr_human(&src_addr, originbuf, sizeof(originbuf));
+        for (i = 0; i < nfds; ++i) {
+            int fd = events[i].data.fd & (EFF_MIN - 1);
 #if 0
-        fprintf(
-            stderr, "got msg with fam %d, addrlen %d, size %zd: %s\n",
-            src_addr.family, addrlen, size, originbuf);
+            fprintf(
+                    stderr, "epoll [%d, 0x%x, 0x%x]\n", i,
+                    events[i].data.fd, events[i].events);
 #endif
-        if (size == 0) {
-            continue;
-        }
-
-        if (buf[size - 1] != '\n') {
-            buf[size++] = '\n';
-        }
-        buf[size] = '\0'; /* just in case */
-
-        outbuf = from_syslog(fullbuf, buf, size, originbuf, &outlen);
-        if (write(STDOUT_FILENO, outbuf, outlen) < 0) {
-            perror("write");
-            break; /* this is bad */
+            if (events[i].data.fd & EFF_ACCEPT) {
+                process_fd_accept(epollfd, maxfdp, fd);
+            } else {
+                process_fd_input(
+                    epollfd, maxfdp, fd, events[i].data.fd & EFF_NOCLOSE);
+            }
         }
     }
 
-    /* We never get here, unless write failed. */
-    close(listenfds[0]);
-    exit(1);
+    /* We should not get here.. */
+    return -1;
+}
+
+void process_fd_input(int epollfd, int* maxfdp, int fd, int noclose)
+{
+    ssize_t size;
+    /* All transport receiver implementations SHOULD be able to
+     * accept messages of up to and including 2048 octets in
+     * length.  Transport receivers MAY receive messages larger
+     * than 2048 octets in length. */
+    const size_t buflen = 8192;
+    const size_t bufprefix = 64; /* MUST be enough for "fac.prio: " */
+    char fullbuf[bufprefix + buflen + 2];
+    char *buf = fullbuf + bufprefix;
+    int flags = 0;
+    union sockaddr_any src_addr = {0};
+    socklen_t addrlen = sizeof(src_addr);
+
+    char originbuf[256];
+    const char *outbuf;
+    int outlen;
+
+    /* NOTE: We might get multiple packets here for STREAM sockets. That
+     * might causes parse issues. See if this is an issue later. */
+    size = recvfrom(
+        fd, buf, buflen, flags,
+        (struct sockaddr*)&src_addr, &addrlen);
+    if (size < 0) {
+        perror("recvfrom");
+        return;
+    }
+
+    if (addrlen == 0) {
+        /* STREAM sockets do not get the address populated with
+         * recvfrom. Forcefully get it anyway using getpeername. */
+        addrlen = sizeof(src_addr);
+        if (getpeername(fd, (struct sockaddr*)&src_addr, &addrlen) < 0) {
+            perror("getpeername");
+        }
+    }
+
+    sockaddr_human(&src_addr, originbuf, sizeof(originbuf));
+#if 0
+    fprintf(
+        stderr, "got msg with fam %d, addrlen %d, size %zd: %s\n",
+        src_addr.family, addrlen, size, originbuf);
+#endif
+
+    if (size == 0) {
+        if (!noclose) {
+            process_fd_close(epollfd, maxfdp, fd);
+            fprintf(
+                stderr, "(fd %d did empty read, closed, maxfd now %d)\n",
+                fd, *maxfdp);
+        }
+        return;
+    }
+
+    if (buf[size - 1] != '\n') {
+        buf[size++] = '\n';
+    }
+    buf[size] = '\0'; /* just in case */
+
+    outbuf = from_syslog(fullbuf, buf, size, originbuf, &outlen);
+    if (write(STDOUT_FILENO, outbuf, outlen) < 0) {
+        perror("write");
+        exit(2); /* this is bad */
+    }
+
+    /* NOTE: Better to close invalid messages immediately than to try
+     * and handle them gracefully. This could be a partial read. If we
+     * have to handle those, we'll have to handle slowloris style
+     * attacks. See if closing is fine. */
+    if (strcmp(outbuf, "ERR\n") == 0 && !noclose) {
+        process_fd_close(epollfd, maxfdp, fd);
+        fprintf(
+            stderr, "(fd %d did garbage read, closed, maxfd now %d)\n",
+            fd, *maxfdp);
+    }
+}
+
+void process_fd_accept(int epollfd, int *maxfdp, int fd)
+{
+    struct epoll_event ev = {0};
+    union sockaddr_any src_addr = {0};
+    socklen_t socklen = sizeof(src_addr);
+    char originbuf[256];
+    int newfd;
+
+    newfd = accept(
+            fd, (struct sockaddr*)&src_addr, &socklen);
+    if (newfd < 0) {
+        perror("accept");
+        return;
+    }
+    sockaddr_human(&src_addr, originbuf, sizeof(originbuf));
+    fprintf(
+            stderr, "(connection on fd %d from %s)\n",
+            newfd, originbuf);
+    if (newfd > EFF_MIN) {
+        fprintf(
+            stderr, "(cannot handle fd as high as %d, closing)\n",
+            newfd);
+        close(newfd);
+        return;
+    }
+
+    ev.events = EPOLLIN | EPOLLHUP;
+    ev.data.fd = newfd;
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, newfd, &ev) < 0) {
+        perror("epoll_ctl: EPOLL_CTL_ADD");
+        /* NOTE: This should not happen. Unsure what is up. Better just
+         * die. */
+        exit(1);
+    }
+
+    if (newfd > *maxfdp) {
+        *maxfdp = newfd;
+    }
+}
+
+void process_fd_close(int epollfd, int *maxfdp, int fd)
+{
+    if (epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, NULL) == -1) {
+        perror("epoll_ctl: EPOLL_CTL_DEL");
+    }
+    close(fd);
+    if (fd == *maxfdp) {
+        /* NOTE: This might be too high if this fd had been closed
+         * previously. Don't care. */
+        --*maxfdp;
+    }
 }
 
 /* vim: set ts=8 sw=4 sts=4 et ai: */

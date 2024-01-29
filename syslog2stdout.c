@@ -30,9 +30,16 @@ License:
   GPL-3.0+
 
 */
+#define PERIODIC_STATUS_REPORT 1
+#define MAX_CONNECTIONS 512
+#ifndef SYSLOG2STDOUT_VERSION
+#define SYSLOG2STDOUT_VERSION "vFIXME"
+#endif
+
 #include <assert.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +51,10 @@ License:
 #include <sys/un.h>
 #include <unistd.h>
 
+#ifdef PERIODIC_STATUS_REPORT
+#include <signal.h>
+#include <time.h>
+#endif
 
 #define all(expr, c_str) ({ \
         char const *ch = (c_str); \
@@ -106,10 +117,113 @@ const char *const priorities[8] = {
     "debug",    /*  7  Debug: debug-level messages */
 };
 
-int process_epoll_events(int epollfd, int* maxfdp);
-void process_fd_input(int epollfd, int* maxfdp, int fd, int is_connected);
-void process_fd_accept(int epollfd, int *maxfdp, int fd);
-void process_fd_close(int epollfd, int *maxfdp, int fd);
+static int process_epoll_events(int epollfd);
+static void process_fd_input(int epollfd, int fd, int is_connected);
+static void process_fd_accept(int epollfd, int fd);
+static void process_fd_close(int epollfd, int fd);
+
+typedef unsigned char mask_t;
+#define mask_array_size(n) ((n + sizeof(mask_t) * 8 - 1) / sizeof(mask_t))
+
+#define HIGHEST_FD MAX_CONNECTIONS
+mask_t connected_fds[mask_array_size(HIGHEST_FD)] = {0};
+
+#define mask_count(mask) mask_count_(mask, sizeof(mask))
+inline static int mask_count_(const mask_t* mask, unsigned max_size)
+{
+    int ret = 0;
+    int idx;
+    for (idx = 0; idx < max_size; ++idx) {
+        int i;
+        mask_t value = mask[idx];
+        for (i = 0; i < sizeof(mask_t) * 8; ++i, value >>= 1) {
+            ret += (value & 1);
+        }
+    }
+    return ret;
+}
+
+#define mask_highest(mask) mask_highest_(mask, sizeof(mask))
+inline static int mask_highest_(const mask_t* mask, unsigned max_size)
+{
+    int idx;
+    for (idx = max_size - 1; idx >= 0; --idx) {
+        int i;
+        mask_t value = mask[idx];
+        for (i = sizeof(mask_t) * 8 - 1; i >= 0; --i) {
+            if (value >> i) {
+                return (idx * sizeof(mask_t) * 8) + i;
+            }
+        }
+    }
+    return 0;
+}
+
+inline static void mask_set(mask_t* mask, int value)
+{
+    mask[value / (sizeof(mask_t) * 8)] |= (
+        1 << (value % (sizeof(mask_t) * 8)));
+}
+
+inline static void mask_unset(mask_t* mask, int value)
+{
+    mask[value / (sizeof(mask_t) * 8)] &= ~(
+        1 << (value % (sizeof(mask_t) * 8)));
+}
+
+#ifdef PERIODIC_STATUS_REPORT
+static void periodic_handler(int sig, siginfo_t *si, void *uc)
+{
+    char buf[100 + HIGHEST_FD * 3 / 8];
+    char *p = buf;
+    int space_idx;
+    int block_idx;
+    int last_used_block = 0;
+
+    /* This will write:
+     * "connect fd mask: " when nothing is connected
+     * "connect fd mask: 0fffffff 1" when fds 4 through 32 are all connected */
+    buf[0] = '\0';
+    strncat(
+        buf, "syslog2stdout " SYSLOG2STDOUT_VERSION " [connected fd mask:",
+        sizeof(buf) - 1);
+    p = buf + strlen(buf);
+
+    for (last_used_block = sizeof(connected_fds) - 1;
+            last_used_block >= 0 && !connected_fds[last_used_block];
+            --last_used_block); /* might become -1 */
+    for (block_idx = 0, space_idx = 0;
+            block_idx <= last_used_block; ++block_idx) {
+        int i;
+        uint32_t block = connected_fds[block_idx];;
+        for (i = 0; i < sizeof(mask_t) * 2 && (
+                    block_idx < last_used_block || block); ++space_idx, ++i) {
+            mask_t m = block & 0xf;
+            block >>= 4;
+            if ((space_idx % 8) == 0) {
+                *p = ' ';
+                ++p;
+            }
+            if (m < 10) {
+                *p = '0' + m;
+            } else {
+                *p = 'a' + m - 10;
+            }
+            ++p;
+        }
+    }
+    *p++ = ']';
+    *p++ = '\n';
+    *p = '\0';
+    assert(p <= (buf + sizeof(buf)));
+
+    /* Technically, using printf() to write to stderr is not safe from a
+     * signal handler. However, we write so little stuff to stderr that
+     * this has a high chance of succeeding and not intermixing with
+     * other data. */
+    fprintf(stderr, "%s", buf);
+}
+#endif
 
 int listen_on_tcp_port(const int port)
 {
@@ -147,7 +261,7 @@ int listen_on_tcp_port(const int port)
     return sockfd;
 }
 
-int listen_on_udp_port(const int port)
+static int listen_on_udp_port(const int port)
 {
     int sockfd;
     struct sockaddr_in6 in6 = {0};
@@ -168,7 +282,7 @@ int listen_on_udp_port(const int port)
     return sockfd;
 }
 
-int listen_on_unixdgram(const char *filename)
+static int listen_on_unixdgram(const char *filename)
 {
     int ret;
     struct stat st;
@@ -207,7 +321,7 @@ int listen_on_unixdgram(const char *filename)
     return sockfd;
 }
 
-const char *sockaddr_human(
+static const char *sockaddr_human(
         const union sockaddr_any *sa, char *buf, size_t buflen)
 {
     int written;
@@ -239,7 +353,7 @@ const char *sockaddr_human(
     return buf;
 }
 
-const char *from_syslog(
+static const char *from_syslog(
         char *start_buf, char *start_msg, int msg_length,
         const char *origin, int *out_length)
 {
@@ -393,10 +507,15 @@ const char *from_syslog(
 
 int main(const int argc, const char *const *argv)
 {
+#ifdef PERIODIC_STATUS_REPORT
+    timer_t timerid;
+    struct sigaction   sa = {0};
+    struct sigevent sev;
+    struct itimerspec its;
+#endif
     int argi;
     int ret;
     int epollfd;
-    int maxfd;
 
     if (argc < 2 || argc > 10) {
         fprintf(
@@ -413,10 +532,37 @@ int main(const int argc, const char *const *argv)
         exit(1);
     }
 
+#ifdef PERIODIC_STATUS_REPORT
+    /* Set handler for periodic updates */
+    sa.sa_flags = 0; SA_SIGINFO;
+    sa.sa_sigaction = periodic_handler;
+    if (sigaction(SIGALRM, &sa, NULL) == -1) {
+        perror("sigaction(SIGALARM)");
+        exit(1);
+    }
+
+    /* Create and start timer for periodic updats */
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGALRM; /* do not care that it does not queue up */
+    sev.sigev_value.sival_ptr = &timerid;
+    if (timer_create(CLOCK_REALTIME, &sev, &timerid) == -1) {
+        perror("timer_create");
+        exit(1);
+    }
+    its.it_value.tv_sec = 1;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = 3600; /* every hour */
+    its.it_interval.tv_nsec = 0;
+    if (timer_settime(timerid, 0, &its, NULL) == -1) {
+        perror("timer_settime");
+        exit(1);
+    }
+#endif
+
     for (argi = 1; argi < argc; ++argi) {
         struct epoll_event ev = {0};
         int fd;
-        int flags;
+        int fd_flags;
 
         /* Try opening a listening socket */
         if (strncmp(argv[argi], "tcp/", 4) == 0 &&
@@ -430,7 +576,7 @@ int main(const int argc, const char *const *argv)
                     portno, strerror(errno));
                 exit(1);
             }
-            flags = EFF_NOCLOSE | EFF_ACCEPT;
+            fd_flags = EFF_NOCLOSE | EFF_ACCEPT;
         } else if (strlen(argv[argi]) &&
                 all(*ch >= '0' && *ch <= '9', argv[argi])) {
             const int portno = atoi(argv[argi]);
@@ -441,7 +587,7 @@ int main(const int argc, const char *const *argv)
                     portno, strerror(errno));
                 exit(1);
             }
-            flags = EFF_NOCLOSE;
+            fd_flags = EFF_NOCLOSE;
         } else {
             const char *listenaddr = argv[argi];
             fd = listen_on_unixdgram(listenaddr);
@@ -451,35 +597,44 @@ int main(const int argc, const char *const *argv)
                     listenaddr, strerror(errno));
                 exit(1);
             }
-            flags = EFF_NOCLOSE;
+            fd_flags = EFF_NOCLOSE;
         }
 
         /* Add to poll events */
         assert(fd < EFF_MIN);
-        ev.data.fd = fd | flags;
+        ev.data.fd = fd | fd_flags;
         ev.events = EPOLLIN;
         if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev) == -1) {
             perror("epoll_ctl");
             exit(1);
         }
 
-        maxfd = fd;
+        /* Used fds will be:
+         * 0 = stdin, 1 = stdout, 2 = stderr, 3 = epollfd
+         * 4 = server socket 1, ...
+         * That leaves us with plenty of fds until we're out. */
+        assert(fd < HIGHEST_FD);
     }
 
     /* Run and listen */
-    ret = process_epoll_events(epollfd, &maxfd);
+    ret = process_epoll_events(epollfd);
 
     /* Cleanup */
     close(epollfd);
-    while (maxfd >= 0) {
-        close(maxfd);
-        --maxfd;
+    {
+        /* This list does not contain our listening sockets. Don't care.
+         * They will be closed upon exit anyway. */
+        int fd = mask_highest(connected_fds);
+        while (fd >= 0) {
+            close(fd);
+            --fd;
+        }
     }
 
     return ret;
 }
 
-int process_epoll_events(int epollfd, int* maxfdp)
+static int process_epoll_events(int epollfd)
 {
     /* NOTE: Max events being too low could cause us to never process
      * events on higher FDs if we keep getting traffic on the low ones.
@@ -494,6 +649,9 @@ int process_epoll_events(int epollfd, int* maxfdp)
 
         nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
         if (nfds < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
             perror("epoll_wait");
             close(epollfd);
             return -1;
@@ -507,11 +665,11 @@ int process_epoll_events(int epollfd, int* maxfdp)
                     events[i].data.fd, events[i].events);
 #endif
             if (events[i].data.fd & EFF_ACCEPT) {
-                process_fd_accept(epollfd, maxfdp, fd);
+                process_fd_accept(epollfd, fd);
             } else {
                 /* Is this a connected socket? */
                 const int is_connected = !(events[i].data.fd & EFF_NOCLOSE);
-                process_fd_input(epollfd, maxfdp, fd, is_connected);
+                process_fd_input(epollfd, fd, is_connected);
             }
         }
     }
@@ -520,7 +678,7 @@ int process_epoll_events(int epollfd, int* maxfdp)
     return -1;
 }
 
-void process_fd_input(int epollfd, int* maxfdp, int fd, int is_connected)
+static void process_fd_input(int epollfd, int fd, int is_connected)
 {
     ssize_t size;
     /* All transport receiver implementations SHOULD be able to
@@ -586,10 +744,12 @@ void process_fd_input(int epollfd, int* maxfdp, int fd, int is_connected)
 
     if (size == 0) {
         if (is_connected) {
-            process_fd_close(epollfd, maxfdp, fd);
+            process_fd_close(epollfd, fd);
+#if 0
             fprintf(
-                stderr, "(fd %d did empty read, closed, maxfd now %d)\n",
-                fd, *maxfdp);
+                stderr, "(fd %d did empty read, closed, now %d connected)\n",
+                fd, mask_count(connected_fds));
+#endif
         }
         return;
     }
@@ -610,64 +770,60 @@ void process_fd_input(int epollfd, int* maxfdp, int fd, int is_connected)
      * have to handle those, we'll have to handle slowloris style
      * attacks. See if closing is fine. */
     if (strcmp(outbuf, "ERR\n") == 0 && is_connected) {
-        process_fd_close(epollfd, maxfdp, fd);
+        process_fd_close(epollfd, fd);
         fprintf(
-            stderr, "(fd %d did garbage read, closed, maxfd now %d)\n",
-            fd, *maxfdp);
+            stderr, "(fd %d did garbage read, closed, now %d connected)\n",
+            fd, mask_count(connected_fds));
     }
 }
 
-void process_fd_accept(int epollfd, int *maxfdp, int fd)
+static void process_fd_accept(int epollfd, int server_fd)
 {
     struct epoll_event ev = {0};
     union sockaddr_any src_addr = {0};
     socklen_t socklen = sizeof(src_addr);
     char originbuf[256];
-    int newfd;
+    int fd;
 
-    newfd = accept(
-            fd, (struct sockaddr*)&src_addr, &socklen);
-    if (newfd < 0) {
+    fd = accept(server_fd, (struct sockaddr*)&src_addr, &socklen);
+    if (fd < 0) {
         perror("accept");
         return;
     }
     sockaddr_human(&src_addr, originbuf, sizeof(originbuf));
+#if 0
     fprintf(
             stderr, "(connection on fd %d from %s)\n",
-            newfd, originbuf);
-    if (newfd > EFF_MIN) {
+            fd, originbuf);
+#endif
+    if (fd >= HIGHEST_FD || fd >= EFF_MIN) {
         fprintf(
             stderr, "(cannot handle fd as high as %d, closing)\n",
-            newfd);
-        close(newfd);
+            fd);
+        close(fd);
         return;
     }
 
     ev.events = EPOLLIN | EPOLLHUP;
-    ev.data.fd = newfd;
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, newfd, &ev) < 0) {
+    ev.data.fd = fd;
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
         perror("epoll_ctl: EPOLL_CTL_ADD");
         /* NOTE: This should not happen. Unsure what is up. Better just
          * die. */
         exit(1);
     }
 
-    if (newfd > *maxfdp) {
-        *maxfdp = newfd;
-    }
+    mask_set(connected_fds, fd);
 }
 
-void process_fd_close(int epollfd, int *maxfdp, int fd)
+static void process_fd_close(int epollfd, int fd)
 {
+    mask_unset(connected_fds, fd);
+
     if (epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, NULL) == -1) {
         perror("epoll_ctl: EPOLL_CTL_DEL");
     }
     close(fd);
-    if (fd == *maxfdp) {
-        /* NOTE: This might be too high if this fd had been closed
-         * previously. Don't care. */
-        --*maxfdp;
-    }
 }
 
 /* vim: set ts=8 sw=4 sts=4 et ai: */

@@ -174,45 +174,47 @@ inline static void mask_unset(mask_t* mask, int value)
 #ifdef PERIODIC_STATUS_REPORT
 static void periodic_handler(int sig, siginfo_t *si, void *uc)
 {
-    char buf[100 + HIGHEST_FD * 3 / 8];
+    char buf[50 + 50 + HIGHEST_FD * 3 / 8];
     char *p = buf;
     int space_idx;
     int block_idx;
     int last_used_block = 0;
 
-    /* This will write:
-     * "connect fd mask: " when nothing is connected
-     * "connect fd mask: 0fffffff 1" when fds 4 through 32 are all connected */
     buf[0] = '\0';
-    strncat(
-        buf, "syslog2stdout " SYSLOG2STDOUT_VERSION " [connected fd mask:",
-        sizeof(buf) - 1);
-    p = buf + strlen(buf);
+    strncat(p, "syslog2stdout " SYSLOG2STDOUT_VERSION, 50);
+    p += strlen(buf);
 
     for (last_used_block = sizeof(connected_fds) - 1;
             last_used_block >= 0 && !connected_fds[last_used_block];
             --last_used_block); /* might become -1 */
-    for (block_idx = 0, space_idx = 0;
-            block_idx <= last_used_block; ++block_idx) {
-        int i;
-        uint32_t block = connected_fds[block_idx];;
-        for (i = 0; i < sizeof(mask_t) * 2 && (
-                    block_idx < last_used_block || block); ++space_idx, ++i) {
-            mask_t m = block & 0xf;
-            block >>= 4;
-            if ((space_idx % 8) == 0) {
-                *p = ' ';
-                ++p;
+    if (last_used_block >= 0) {
+        /* This will write:
+         * "connect fd mask: " when nothing is connected
+         * "connect fd mask: 0fffffff 1" when fds 4 through 32 are all
+         * connected */
+        strncat(p, " [connected fd mask:", 50);
+        p += strlen(p);
+
+        for (block_idx = 0, space_idx = 0;
+                block_idx <= last_used_block; ++block_idx) {
+            int i;
+            uint32_t block = connected_fds[block_idx];;
+            for (i = 0; i < sizeof(mask_t) * 2 && (
+                        block_idx < last_used_block || block); ++space_idx, ++i) {
+                mask_t m = block & 0xf;
+                block >>= 4;
+                if ((space_idx % 8) == 0) {
+                    *p++ = ' ';
+                }
+                if (m < 10) {
+                    *p++ = '0' + m;
+                } else {
+                    *p++ = 'a' + m - 10;
+                }
             }
-            if (m < 10) {
-                *p = '0' + m;
-            } else {
-                *p = 'a' + m - 10;
-            }
-            ++p;
         }
+        *p++ = ']';
     }
-    *p++ = ']';
     *p++ = '\n';
     *p = '\0';
     assert(p <= (buf + sizeof(buf)));
@@ -520,6 +522,7 @@ int main(const int argc, const char *const *argv)
     if (argc < 2 || argc > 10) {
         fprintf(
             stderr,
+            "syslog2stdout " SYSLOG2STDOUT_VERSION "\n"
             "Usage: syslog2stdout LISTENADDR...\n"
             "Where LISTENADDR is one of '/dev/log' or '514' or 'tcp/514'\n");
         exit(1);

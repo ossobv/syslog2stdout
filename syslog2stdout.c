@@ -128,6 +128,10 @@ typedef unsigned char mask_t;
 #define HIGHEST_FD MAX_CONNECTIONS
 mask_t connected_fds[mask_array_size(HIGHEST_FD)] = {0};
 
+/* NOTE: We can also use these masks to store tcp last message. Have it
+ * set the mask if something was said in the last half hour. If not,
+ * then we can kill the connection after the next rotation. */
+
 #define mask_count(mask) mask_count_(mask, sizeof(mask))
 inline static int mask_count_(const mask_t* mask, unsigned max_size)
 {

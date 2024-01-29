@@ -107,7 +107,7 @@ const char *const priorities[8] = {
 };
 
 int process_epoll_events(int epollfd, int* maxfdp);
-void process_fd_input(int epollfd, int* maxfdp, int fd, int noclose);
+void process_fd_input(int epollfd, int* maxfdp, int fd, int is_connected);
 void process_fd_accept(int epollfd, int *maxfdp, int fd);
 void process_fd_close(int epollfd, int *maxfdp, int fd);
 
@@ -509,8 +509,9 @@ int process_epoll_events(int epollfd, int* maxfdp)
             if (events[i].data.fd & EFF_ACCEPT) {
                 process_fd_accept(epollfd, maxfdp, fd);
             } else {
-                process_fd_input(
-                    epollfd, maxfdp, fd, events[i].data.fd & EFF_NOCLOSE);
+                /* Is this a connected socket? */
+                const int is_connected = !(events[i].data.fd & EFF_NOCLOSE);
+                process_fd_input(epollfd, maxfdp, fd, is_connected);
             }
         }
     }
@@ -519,18 +520,17 @@ int process_epoll_events(int epollfd, int* maxfdp)
     return -1;
 }
 
-void process_fd_input(int epollfd, int* maxfdp, int fd, int noclose)
+void process_fd_input(int epollfd, int* maxfdp, int fd, int is_connected)
 {
     ssize_t size;
     /* All transport receiver implementations SHOULD be able to
      * accept messages of up to and including 2048 octets in
      * length.  Transport receivers MAY receive messages larger
      * than 2048 octets in length. */
-    const size_t buflen = 8192;
+    size_t buflen = 8192;
     const size_t bufprefix = 64; /* MUST be enough for "fac.prio: " */
     char fullbuf[bufprefix + buflen + 2];
     char *buf = fullbuf + bufprefix;
-    int flags = 0;
     union sockaddr_any src_addr = {0};
     socklen_t addrlen = sizeof(src_addr);
 
@@ -538,10 +538,30 @@ void process_fd_input(int epollfd, int* maxfdp, int fd, int noclose)
     const char *outbuf;
     int outlen;
 
-    /* NOTE: We might get multiple packets here for STREAM sockets. That
-     * might causes parse issues. See if this is an issue later. */
+    if (is_connected) {
+        /* We might get multiple packets here for STREAM sockets. We
+         * expect the messages to be LF-terminated. Reading it twice,
+         * using MSG_PEEK allows us to keep no state about the socket.
+         * This does make TCP sockets slightly less performant. So be it. */
+        const int flags = MSG_PEEK;
+        const char *p;
+
+        size = recvfrom(
+            fd, buf, buflen, flags,
+            (struct sockaddr*)&src_addr, &addrlen);
+        if (size < 0) {
+            perror("recvfrom(MSG_PEEK)");
+            return;
+        }
+        p = memchr(buf, '\n', size);
+        if (p != NULL) {
+            assert(p < buf + buflen);
+            buflen = (p - buf + 1);
+        }
+    }
+
     size = recvfrom(
-        fd, buf, buflen, flags,
+        fd, buf, buflen, 0,
         (struct sockaddr*)&src_addr, &addrlen);
     if (size < 0) {
         perror("recvfrom");
@@ -549,8 +569,8 @@ void process_fd_input(int epollfd, int* maxfdp, int fd, int noclose)
     }
 
     if (addrlen == 0) {
-        /* STREAM sockets do not get the address populated with
-         * recvfrom. Forcefully get it anyway using getpeername. */
+        /* Connected sockets do not get the address populated by recvfrom().
+         * Forcefully get it anyway by using getpeername(). */
         addrlen = sizeof(src_addr);
         if (getpeername(fd, (struct sockaddr*)&src_addr, &addrlen) < 0) {
             perror("getpeername");
@@ -565,7 +585,7 @@ void process_fd_input(int epollfd, int* maxfdp, int fd, int noclose)
 #endif
 
     if (size == 0) {
-        if (!noclose) {
+        if (is_connected) {
             process_fd_close(epollfd, maxfdp, fd);
             fprintf(
                 stderr, "(fd %d did empty read, closed, maxfd now %d)\n",
@@ -589,7 +609,7 @@ void process_fd_input(int epollfd, int* maxfdp, int fd, int noclose)
      * and handle them gracefully. This could be a partial read. If we
      * have to handle those, we'll have to handle slowloris style
      * attacks. See if closing is fine. */
-    if (strcmp(outbuf, "ERR\n") == 0 && !noclose) {
+    if (strcmp(outbuf, "ERR\n") == 0 && is_connected) {
         process_fd_close(epollfd, maxfdp, fd);
         fprintf(
             stderr, "(fd %d did garbage read, closed, maxfd now %d)\n",

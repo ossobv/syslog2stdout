@@ -1,5 +1,5 @@
 *.swp
 
 /syslog2stdout
-/syslog2stdout-musl
-/syslog2stdout-static
+/syslog2stdout-glibc.*
+/syslog2stdout-musl.*

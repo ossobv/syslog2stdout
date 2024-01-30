@@ -1,10 +1,11 @@
-.PHONY: clean all static
+.PHONY: clean all static-builds
 CFLAGS = -Wall -g -O3
 ARCH = $(shell uname -m)
 VERSION = $(shell git describe | sed -e 's/-\([^-]*$$\)/+\1/')
 CPPFLAGS = -DSYSLOG2STDOUT_VERSION='"$(VERSION)"'
+APP_STATIC = syslog2stdout-glibc.$(ARCH) syslog2stdout-musl.$(ARCH)
 
-all: syslog2stdout static
+all: syslog2stdout static-builds
 
 syslog2stdout: syslog2stdout.c
 
@@ -16,7 +17,7 @@ syslog2stdout-musl.$(ARCH): syslog2stdout.c /usr/bin/x86_64-linux-musl-gcc
 	# sudo apt-get install musl-dev
 	/usr/bin/x86_64-linux-musl-gcc $(LDFLAGS) $(CFLAGS) $(CPPFLAGS) -static -fdata-sections -ffunction-sections $< -o $@ -Wl,--gc-sections -Wl,--strip-all
 
-static: syslog2stdout-glibc.$(ARCH) syslog2stdout-musl.$(ARCH)
+static-builds: syslog2stdout-glibc.$(ARCH) syslog2stdout-musl.$(ARCH)
 	@echo du:
 	@echo '```'
 	@du -bh syslog2stdout-*
@@ -27,4 +28,4 @@ static: syslog2stdout-glibc.$(ARCH) syslog2stdout-musl.$(ARCH)
 	@echo '```'
 
 clean:
-	$(RM) syslog2stdout syslog2stdout-static syslog2stdout-musl
+	$(RM) syslog2stdout $(APP_STATIC)

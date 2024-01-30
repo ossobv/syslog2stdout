@@ -556,9 +556,9 @@ int main(const int argc, const char *const *argv)
         perror("timer_create");
         exit(1);
     }
-    its.it_value.tv_sec = 1;
+    its.it_value.tv_sec = 1; /* fire in a second; after socket setup? */
     its.it_value.tv_nsec = 0;
-    its.it_interval.tv_sec = 3600; /* every hour */
+    its.it_interval.tv_sec = 3600; /* fire hourly */
     its.it_interval.tv_nsec = 0;
     if (timer_settime(timerid, 0, &its, NULL) == -1) {
         perror("timer_settime");
@@ -649,20 +649,43 @@ static int process_epoll_events(int epollfd)
 #define MAX_EVENTS 100
     struct epoll_event events[MAX_EVENTS];
     int nfds;
+#ifdef PERIODIC_STATUS_REPORT
+    sigset_t sigset_with_alarm;
+    sigemptyset(&sigset_with_alarm);
+    sigaddset(&sigset_with_alarm, SIGALRM);
+#endif
 
     /* Go into infinite loop */
     while (1) {
         int i;
 
-        nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
-        if (nfds < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            perror("epoll_wait");
-            close(epollfd);
+#ifdef PERIODIC_STATUS_REPORT
+        /* Allow signals during epoll_wait */
+        if (sigprocmask(SIG_UNBLOCK, &sigset_with_alarm, NULL) < 0) {
+            perror("sigprocmask(SIG_UNBLOCK)");
             return -1;
         }
+#endif
+
+        do {
+            nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
+            if (nfds < 0) {
+                if (errno == EINTR) {
+                    nfds = 0;
+                } else {
+                    perror("epoll_wait");
+                    return -1;
+                }
+            }
+        } while (nfds == 0);
+
+#ifdef PERIODIC_STATUS_REPORT
+        /* No signals during processing */
+        if (sigprocmask(SIG_BLOCK, &sigset_with_alarm, NULL) < 0) {
+            perror("sigprocmask(SIG_BLOCK)");
+            return -1;
+        }
+#endif
 
         for (i = 0; i < nfds; ++i) {
             int fd = events[i].data.fd & (EFF_MIN - 1);

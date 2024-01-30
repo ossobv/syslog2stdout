@@ -42,7 +42,7 @@ static-builds: syslog2stdout-glibc.$(ARCH) syslog2stdout-musl.$(ARCH)
 	@echo '```'
 	@echo versions:
 	@echo '```'
-	@for app in $^; do echo "$$app: $$(./$$app 2>&1 | head -n1)"; done
+	@for app in $^; do echo "$$(./$$app 2>&1 | head -n1)  $$app"; done
 	@echo '```'
 
 clean:
